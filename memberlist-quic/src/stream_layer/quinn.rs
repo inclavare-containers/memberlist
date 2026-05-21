@@ -389,7 +389,7 @@ impl QuicStream for QuinnStream {
     self
       .recv
       .stream
-      .read_to_end(u32::MAX as usize)
+      .read_to_end(10 * 1024 * 1024)
       .await
       .map(|data| {
         if !self.recv.peek_buf.is_empty() {
