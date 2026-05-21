@@ -1,3 +1,5 @@
+use smol_str::SmolStr;
+
 use super::*;
 
 /// Errors that can occur when using [`QuicTransport`].
@@ -29,9 +31,15 @@ pub enum QuicTransportError<A: AddressResolver> {
   /// Returns when the using Wire to encode/decode message.
   #[error(transparent)]
   Io(#[from] std::io::Error),
-  /// Returns when the packet is too large.
-  #[error("packet too large, the maximum packet can be sent is 65535, got {0}")]
-  PacketTooLarge(usize),
+  /// Returns when a packet exceeds the maximum allowed size.
+  #[error("packet too large")]
+  PacketTooLarge,
+  /// Returns when the connection is closed.
+  #[error("connection closed: {0}")]
+  ConnectionClosed(SmolStr),
+  /// Returns when the stream is closed.
+  #[error("stream closed: {0}")]
+  StreamClosed(SmolStr),
   /// Returns when there is a custom error.
   #[error("{0}")]
   Custom(std::borrow::Cow<'static, str>),
@@ -61,6 +69,7 @@ where
           | ErrorKind::TimedOut
           | ErrorKind::NotConnected
       ),
+      Self::ConnectionClosed(_) | Self::StreamClosed(_) | Self::PacketTooLarge => true,
       _ => false,
     }
   }
