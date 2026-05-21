@@ -80,6 +80,9 @@ where
       let fut2 = async {
         match acceptor.accept().await {
           Ok((connection, remote_addr)) => {
+            // Reset backoff delay on successful accept
+            loop_delay = Duration::ZERO;
+
             let shutdown_rx = shutdown_rx.clone();
             let packet_tx = packet_tx.clone();
             let stream_tx = stream_tx.clone();
@@ -258,7 +261,7 @@ where
     let msg = match res {
       Ok(msg) => msg,
       Err(e) => {
-        tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic.packet: fail to handle UDP packet");
+        tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist_quic.packet: fail to handle packet");
         return;
       }
     };
