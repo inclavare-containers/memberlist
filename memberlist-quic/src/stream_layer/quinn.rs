@@ -329,6 +329,18 @@ impl QuicConnection for QuinnConnection {
     Ok((QuinnStream::new(send, recv, self.max_packet_size), self.remote_addr))
   }
 
+  async fn send_datagram(&self, data: bytes::Bytes) -> io::Result<()> {
+    self.conn.send_datagram(data).map_err(|e| {
+      io::Error::new(io::ErrorKind::Other, format!("failed to send datagram: {e}"))
+    })
+  }
+
+  async fn recv_datagram(&self) -> io::Result<bytes::Bytes> {
+    self.conn.read_datagram().await.map_err(|e| {
+      io::Error::new(io::ErrorKind::Other, format!("datagram read error: {e}"))
+    })
+  }
+
   async fn close(&self) -> io::Result<()> {
     self.conn.close(0u32.into(), b"close connection");
     Ok(())

@@ -41,28 +41,6 @@ pub use options::*;
 pub mod stream_layer;
 use stream_layer::*;
 
-const PACKET_TAG: u8 = 254;
-const STREAM_TAG: u8 = 255;
-
-#[derive(Copy, Clone)]
-#[repr(u8)]
-enum StreamType {
-  Stream = STREAM_TAG,
-  Packet = PACKET_TAG,
-}
-
-impl TryFrom<u8> for StreamType {
-  type Error = u8;
-
-  fn try_from(value: u8) -> Result<Self, Self::Error> {
-    Ok(match value {
-      STREAM_TAG => Self::Stream,
-      PACKET_TAG => Self::Packet,
-      _ => return Err(value),
-    })
-  }
-}
-
 #[cfg(feature = "tokio")]
 /// [`QuicTransport`] based on [`tokio`](https://crates.io/crates/tokio).
 pub type TokioQuicTransport<I, A, S> = QuicTransport<I, A, S, agnostic_lite::tokio::TokioRuntime>;
@@ -318,42 +296,42 @@ where
     }
   }
 
-  async fn fetch_stream(
+  async fn fetch_connection(
     &self,
     addr: SocketAddr,
-    timeout: Option<R::Instant>,
-  ) -> Result<S::Stream, QuicTransportError<A>> {
+    _deadline: Option<R::Instant>,
+  ) -> Result<S::Connection, QuicTransportError<A>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let (_, connection) = ent.value();
       if !connection.is_closed().await {
-        if let Some(timeout) = timeout {
-          return R::timeout_at(timeout, connection.open_bi())
-            .await
-            .map_err(|e| QuicTransportError::Io(e.into()))?
-            .map(|(stream, _)| stream)
-            .map_err(Into::into);
-        } else {
-          return connection
-            .open_bi()
-            .await
-            .map(|(s, _)| s)
-            .map_err(Into::into);
-        }
+        return Ok(connection.clone());
       }
     }
 
     let connector = self.next_connector(&addr);
     let connection = connector.connect(addr).await?;
-    connection
-      .open_bi()
-      .await
-      .map(|(s, _)| {
-        self
-          .connection_pool
-          .insert(addr, (Instant::now(), connection));
-        s
-      })
-      .map_err(Into::into)
+    self.connection_pool.insert(addr, (Instant::now(), connection.clone()));
+    Ok(connection)
+  }
+
+  async fn open_stream(
+    &self,
+    addr: SocketAddr,
+    deadline: Option<R::Instant>,
+  ) -> Result<S::Stream, QuicTransportError<A>> {
+    let conn = self.fetch_connection(addr, deadline).await?;
+    match deadline {
+      Some(dl) => R::timeout_at(dl, conn.open_bi())
+        .await
+        .map_err(|e| QuicTransportError::Io(e.into()))?
+        .map(|(s, _)| s)
+        .map_err(Into::into),
+      None => conn
+        .open_bi()
+        .await
+        .map(|(s, _)| s)
+        .map_err(Into::into),
+    }
   }
 }
 
@@ -443,49 +421,22 @@ where
 
   async fn read(
     &self,
-    from: &Self::ResolvedAddress,
-    conn: &mut <Self::Connection as Connection>::Reader,
+    _from: &Self::ResolvedAddress,
+    _conn: &mut <Self::Connection as Connection>::Reader,
   ) -> Result<usize, Self::Error> {
-    // Consume the stream type tag byte that was peeked by the processor
-    // in handle_stream(). The processor peeked exactly 1 byte to determine
-    // whether this is a Stream or Packet stream, so we must consume it here
-    // before the decoder reads the proto message payload.
-    let mut buf = [0; 1];
-    conn.read_exact(&mut buf).await?;
-    match StreamType::try_from(buf[0]) {
-      Ok(StreamType::Stream) => Ok(1),
-      Ok(StreamType::Packet) => Err(QuicTransportError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("receive an unexpected packet stream from {from}"),
-      ))),
-      Err(tag) => Err(QuicTransportError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!(
-          "receive a stream from {from} with invalid type value: {}",
-          tag
-        ),
-      ))),
-    }
+    // The stream no longer carries a type tag byte since packets are now
+    // sent via QUIC datagrams instead of bidirectional streams.
+    // This method exists to satisfy the Transport trait interface but
+    // does nothing — all data on the stream is proto message data.
+    Ok(0)
   }
 
   async fn write(
     &self,
     conn: &mut <Self::Connection as Connection>::Writer,
-    mut src: Payload,
+    src: Payload,
   ) -> Result<usize, Self::Error> {
     use memberlist_core::proto::ProtoWriter;
-
-    let header = src.header_mut();
-    if header.is_empty() {
-      return Err(QuicTransportError::custom(
-        "not enough space for header".into(),
-      ));
-    }
-    header[0] = StreamType::Stream as u8;
-    let ttl = self
-      .opts
-      .timeout
-      .map(|ttl| <Self::Runtime as RuntimeLite>::now() + ttl);
 
     let src = src.as_slice();
     tracing::trace!(
@@ -494,6 +445,8 @@ where
       "memberlist_quic.stream"
     );
 
+    let start = <Self::Runtime as RuntimeLite>::now();
+    let ttl = self.opts.timeout.map(|ttl| start + ttl);
     match ttl {
       None => {
         conn.write_all(src).await?;
@@ -512,36 +465,33 @@ where
   async fn send_to(
     &self,
     addr: &Self::ResolvedAddress,
-    mut src: Payload,
+    src: Payload,
   ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
     let start = <Self::Runtime as RuntimeLite>::now();
     let ttl = self.opts.timeout.map(|ttl| start + ttl);
-    let mut stream = self.fetch_stream(*addr, ttl).await?;
-    let header = src.header_mut();
-    if header.is_empty() {
-      return Err(QuicTransportError::custom(
-        "not enough space for header".into(),
-      ));
-    }
-    header[0] = StreamType::Packet as u8;
+    let conn = self.fetch_connection(*addr, ttl).await?;
 
-    let src = src.as_slice();
+    // Datagrams don't need a stream type tag — they're already a separate
+    // channel from streams. Skip the reserved header byte and send only
+    // the proto message payload.
+    let data = bytes::Bytes::copy_from_slice(src.as_slice());
+
     tracing::trace!(
-      total_bytes = %src.len(),
-      sent = ?src,
+      total_bytes = %data.len(),
+      sent = ?data,
       "memberlist_quic.packet"
     );
 
     match ttl {
       None => {
-        stream.write_all(src).await?;
-        stream.flush().await?;
-
-        Ok((src.len(), start))
+        let len = data.len();
+        conn.send_datagram(data).await?;
+        Ok((len, start))
       }
       Some(ttl) => R::timeout_at(ttl, async {
-        stream.write_all(src).await?;
-        stream.flush().await.map(|_| (src.len(), start))
+        let len = data.len();
+        conn.send_datagram(data).await?;
+        Ok::<_, QuicTransportError<A>>((len, start))
       })
       .await
       .map_err(std::io::Error::from)?
@@ -554,7 +504,7 @@ where
     addr: &<Self::Resolver as AddressResolver>::ResolvedAddress,
     deadline: R::Instant,
   ) -> Result<Self::Connection, Self::Error> {
-    self.fetch_stream(*addr, Some(deadline)).await
+    self.open_stream(*addr, Some(deadline)).await
   }
 
   fn packet(
