@@ -256,12 +256,6 @@ impl memberlist_core::transport::Connection for QuinnStream {
   async fn peek_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
     memberlist_core::proto::ProtoReader::peek_exact(&mut self.recv, buf).await
   }
-
-  fn consume_peek(&mut self) {
-    // AsyncPeekable's internal buffer is private and can only be consumed
-    // via read operations. The QUIC processor handles this by calling
-    // read_exact(&mut [0; 1]) to drain the peek buffer before read_packet.
-  }
 }
 
 impl QuicStream for QuinnStream {
