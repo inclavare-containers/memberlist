@@ -226,25 +226,24 @@ impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
         Ok(peek_len)
       }
       cmp::Ordering::Greater => {
-        let want = dst_len - peek_len;
         self.peek_buf.resize(dst_len, 0);
-        match self
-          .stream
-          .read(&mut self.peek_buf[peek_len..peek_len + want])
-          .await
-        {
+        match self.stream.read(&mut self.peek_buf[peek_len..]).await {
           Ok(Some(n)) => {
-            let has = peek_len + n;
-            if n < want {
-              self.peek_buf.truncate(has);
-            }
-            buf[..has].copy_from_slice(&self.peek_buf);
-            Ok(peek_len + n)
+            let total = peek_len + n;
+            self.peek_buf.truncate(total);
+            buf[..total].copy_from_slice(&self.peek_buf);
+            Ok(total)
           }
-          Ok(None) | Err(_) => {
+          Ok(None) => {
+            // EOF: return whatever was in peek_buf, restore state
             self.peek_buf.truncate(peek_len);
             buf[..peek_len].copy_from_slice(&self.peek_buf);
             Ok(peek_len)
+          }
+          Err(e) => {
+            // Propagate the error, restore peek_buf state
+            self.peek_buf.truncate(peek_len);
+            Err(e.into())
           }
         }
       }
@@ -268,12 +267,22 @@ impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
         self.peek_buf.resize(dst_len, 0);
         let mut total = peek_len;
         while total < dst_len {
-          let n = self
-            .stream
-            .read(&mut self.peek_buf[total..])
-            .await?
-            .unwrap_or(0);
+          let n = match self.stream.read(&mut self.peek_buf[total..]).await {
+            Ok(Some(n)) => n,
+            Ok(None) => {
+              self.peek_buf.truncate(peek_len);
+              return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "unexpected eof",
+              ));
+            }
+            Err(e) => {
+              self.peek_buf.truncate(peek_len);
+              return Err(e.into());
+            }
+          };
           if n == 0 {
+            self.peek_buf.truncate(peek_len);
             return Err(std::io::Error::new(
               std::io::ErrorKind::UnexpectedEof,
               "unexpected eof",
@@ -296,17 +305,14 @@ impl memberlist_core::proto::ProtoReader for QuinnProtoReader {
       self.peek_buf.drain(..dst_len);
       Ok(dst_len)
     } else {
+      // Consume peeked data, then do a single read for the rest
       buf[..peek_len].copy_from_slice(&self.peek_buf);
       self.peek_buf.clear();
-      let mut total = peek_len;
-      while total < dst_len {
-        let n = self.stream.read(&mut buf[total..]).await?.unwrap_or(0);
-        if n == 0 {
-          break;
-        }
-        total += n;
+      match self.stream.read(&mut buf[peek_len..]).await {
+        Ok(Some(n)) => Ok(peek_len + n),
+        Ok(None) => Ok(peek_len), // EOF: return whatever we got from peek_buf
+        Err(e) => Err(e.into()),
       }
-      Ok(total)
     }
   }
 
@@ -400,27 +406,29 @@ impl QuicStream for QuinnStream {
 
   async fn read_packet(&mut self) -> std::io::Result<bytes::Bytes> {
     // TODO(al8n): make size limit configurable?
-    self
+    let data = self
       .recv
       .stream
       .read_to_end(10 * 1024 * 1024)
       .await
-      .map(|data| {
-        if !self.recv.peek_buf.is_empty() {
-          let mut buf = bytes::BytesMut::with_capacity(self.recv.peek_buf.len() + data.len());
-          buf.extend_from_slice(&self.recv.peek_buf);
-          buf.extend_from_slice(&data);
-          buf.freeze()
-        } else {
-          data.into()
-        }
-      })
       .map_err(|e| match e {
         quinn::ReadToEndError::Read(e) => std::io::Error::from(e),
         quinn::ReadToEndError::TooLong => {
           std::io::Error::new(std::io::ErrorKind::InvalidData, "packet too large")
         }
-      })
+      })?;
+
+    // Merge any previously peeked-but-not-consumed data, then clear peek_buf.
+    let result = if !self.recv.peek_buf.is_empty() {
+      let mut buf = bytes::BytesMut::with_capacity(self.recv.peek_buf.len() + data.len());
+      buf.extend_from_slice(&self.recv.peek_buf);
+      buf.extend_from_slice(&data);
+      buf.freeze()
+    } else {
+      data.into()
+    };
+    self.recv.peek_buf.clear();
+    Ok(result)
   }
 }
 
