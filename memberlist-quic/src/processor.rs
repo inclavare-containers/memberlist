@@ -218,7 +218,13 @@ where
         }
       }
       Ok(StreamType::Packet) => {
-        stream.consume_peek();
+        // Drain the peeked tag byte so read_packet starts at the packet data.
+        let mut _tag = [0u8; 1];
+        if let Err(e) = stream.read_exact(&mut _tag).await {
+          tracing::error!(local=%local_addr, from=%remote_addr, err = %e, "memberlist.transport.quic: failed to consume stream tag");
+          return;
+        }
+
         Self::handle_packet(
           &mut stream,
           local_addr,
