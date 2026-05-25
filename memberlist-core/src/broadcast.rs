@@ -195,3 +195,79 @@ where
     Ok(to_send)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::net::SocketAddr;
+
+  use futures::FutureExt;
+  use smol_str::SmolStr;
+
+  use super::*;
+  use crate::proto::{Alive, Node};
+
+  fn broadcast(
+    node: &str,
+    notify: Option<async_channel::Sender<()>>,
+  ) -> MemberlistBroadcast<SmolStr, SocketAddr> {
+    MemberlistBroadcast {
+      node: node.into(),
+      msg: Message::Alive(Alive::new(
+        1,
+        Node::new(
+          node.into(),
+          "127.0.0.1:1".parse().unwrap(),
+        ),
+      )),
+      notify,
+    }
+  }
+
+  #[test]
+  fn memberlist_broadcast_accessors_and_debug() {
+    let item = broadcast("node-a", None);
+    let same = broadcast("node-a", None);
+    let other = broadcast("node-b", None);
+
+    assert_eq!(item.id(), Some(&"node-a".into()));
+    assert!(item.invalidates(&same));
+    assert!(!item.invalidates(&other));
+    assert_eq!(item.message(), &item.msg);
+    assert_eq!(
+      MemberlistBroadcast::<SmolStr, SocketAddr>::encoded_len(item.message()),
+      item.message().encoded_len_with_length_delimited()
+    );
+    assert!(!item.is_unique());
+    assert!(format!("{item:?}").contains("MemberlistBroadcast"));
+  }
+
+  #[tokio::test]
+  async fn memberlist_broadcast_finished_notifies_when_open() {
+    let (tx, rx) = async_channel::bounded(1);
+    let item = broadcast("node-a", Some(tx));
+
+    item.finished().await;
+
+    assert!(rx.recv().await.is_ok());
+  }
+
+  #[tokio::test]
+  async fn memberlist_broadcast_finished_ignores_closed_receiver() {
+    let (tx, rx) = async_channel::bounded(1);
+    drop(rx);
+    let item = broadcast("node-a", Some(tx));
+
+    item.finished().await;
+  }
+
+  #[tokio::test]
+  async fn memberlist_broadcast_finished_without_notify_is_noop() {
+    let item = broadcast("node-a", None);
+    item.finished().await;
+
+    futures::select! {
+      _ = futures::future::pending::<()>().fuse() => panic!("pending future should not complete"),
+      default => {},
+    }
+  }
+}
