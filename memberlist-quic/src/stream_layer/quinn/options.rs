@@ -133,9 +133,7 @@ pub struct Options {
       const,
       attrs(doc = "Gets the maximum packet size in bytes for `read_packet()`.")
     ),
-    setter(attrs(
-      doc = "Sets the maximum packet size in bytes for `read_packet()`."
-    ))
+    setter(attrs(doc = "Sets the maximum packet size in bytes for `read_packet()`."))
   )]
   max_packet_size: u32,
 

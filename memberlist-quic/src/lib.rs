@@ -310,7 +310,9 @@ where
 
     let connector = self.next_connector(&addr);
     let connection = connector.connect(addr).await?;
-    self.connection_pool.insert(addr, (Instant::now(), connection.clone()));
+    self
+      .connection_pool
+      .insert(addr, (Instant::now(), connection.clone()));
     Ok(connection)
   }
 
@@ -326,11 +328,7 @@ where
         .map_err(|e| QuicTransportError::Io(e.into()))?
         .map(|(s, _)| s)
         .map_err(Into::into),
-      None => conn
-        .open_bi()
-        .await
-        .map(|(s, _)| s)
-        .map_err(Into::into),
+      None => conn.open_bi().await.map(|(s, _)| s).map_err(Into::into),
     }
   }
 }
