@@ -173,6 +173,9 @@ mod encrypted_gossip_transition;
 #[path = "net/join.rs"]
 mod join;
 
+#[path = "net/join_many.rs"]
+mod join_many;
+
 #[path = "net/join_with_labels.rs"]
 mod join_with_labels;
 

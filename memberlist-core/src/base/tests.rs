@@ -983,6 +983,58 @@ where
   ));
 }
 
+/// Unit test for joining multiple seed addresses.
+pub async fn memberlist_join_many<T, R>(
+  t1: T::Options,
+  t2: T::Options,
+  t3: T::Options,
+  t4: T::Options,
+) where
+  T: Transport<Runtime = R, ResolvedAddress = SocketAddr>,
+  R: RuntimeLite,
+{
+  let m1 = Memberlist::<T, _>::new(t1, Options::lan()).await.unwrap();
+  let m2 = Memberlist::<T, _>::new(t2, Options::lan()).await.unwrap();
+  let m3 = Memberlist::<T, _>::new(t3, Options::lan()).await.unwrap();
+
+  let joined = m3
+    .join_many(
+      [m1.advertise_address(), m2.advertise_address()]
+        .into_iter()
+        .copied()
+        .map(MaybeResolvedAddress::resolved),
+    )
+    .await
+    .unwrap();
+  assert_eq!(joined.len(), 2);
+
+  wait_until_size::<_, _, R>(&m1, 3).await;
+  wait_until_size::<_, _, R>(&m2, 3).await;
+  wait_until_size::<_, _, R>(&m3, 3).await;
+
+  let m4 = Memberlist::<T, _>::new(t4, Options::lan()).await.unwrap();
+  let unavailable = SocketAddr::from(([127, 0, 0, 1], 1));
+  let (successes, err) = m4
+    .join_many(
+      [unavailable, *m1.advertise_address()]
+        .into_iter()
+        .map(MaybeResolvedAddress::resolved),
+    )
+    .await
+    .unwrap_err();
+
+  assert_eq!(successes.as_slice(), [*m1.advertise_address()]);
+  assert!(!err.to_string().is_empty());
+
+  wait_until_size::<_, _, R>(&m1, 4).await;
+  wait_until_size::<_, _, R>(&m4, 4).await;
+
+  m1.shutdown().await.unwrap();
+  m2.shutdown().await.unwrap();
+  m3.shutdown().await.unwrap();
+  m4.shutdown().await.unwrap();
+}
+
 /// Unit tests for leave
 pub async fn memberlist_leave<T, R>(
   t1: T::Options,
