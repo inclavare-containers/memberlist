@@ -57,3 +57,225 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::TlsOptions {
     connector,
   )
 }
+
+#[cfg(all(test, feature = "tokio", feature = "tcp"))]
+mod unit_tests {
+  use std::{borrow::Cow, io, net::SocketAddr};
+
+  use agnostic::{RuntimeLite, tokio::TokioRuntime};
+  use memberlist_core::{
+    proto::CIDRsPolicy,
+    transport::{Connection as _, Transport as _, TransportError as _},
+  };
+  use nodecraft::resolver::socket_addr::SocketAddrResolver;
+  use smol_str::SmolStr;
+
+  use crate::{
+    NetTransport, NetTransportError, NetTransportOptions, StreamLayer as _,
+    stream_layer::{Listener as _, PromisedStream as _, tcp::Tcp},
+  };
+
+  type TestResolver = SocketAddrResolver<TokioRuntime>;
+  type TestLayer = Tcp<TokioRuntime>;
+  type TestTransport = NetTransport<SmolStr, TestResolver, TestLayer, TokioRuntime>;
+
+  fn rt() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+      .enable_all()
+      .build()
+      .unwrap()
+  }
+
+  fn loopback(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+  }
+
+  #[test]
+  fn options_defaults_clone_and_into_parts() {
+    let _default_opts =
+      <TestTransport as memberlist_core::transport::Transport>::Options::new("node-default".into());
+    let _resolver_opts =
+      <TestTransport as memberlist_core::transport::Transport>::Options::with_resolver_options(
+        "node-resolver".into(),
+        (),
+      );
+
+    let opts =
+      NetTransportOptions::<SmolStr, TestResolver, TestLayer>::with_resolver_options_and_stream_layer_options(
+        "node-a".into(),
+        (),
+        (),
+      )
+      .with_cidrs_policy(CIDRsPolicy::block_all())
+      .with_max_packet_size(512)
+      .with_recv_buffer_size(1024)
+      .with_advertise_address(loopback(9000));
+
+    let mut cloned = opts.clone();
+    cloned.add_bind_address(loopback(0));
+    cloned.add_bind_address(loopback(0));
+
+    assert_eq!(cloned.id(), "node-a");
+    assert_eq!(cloned.bind_addresses().len(), 1);
+    assert_eq!(cloned.advertise_address(), Some(&loopback(9000)));
+    assert!(cloned.cidrs_policy().is_block_all());
+    assert_eq!(cloned.max_packet_size(), 512);
+    assert_eq!(cloned.recv_buffer_size(), 1024);
+
+    let (_resolver_opts, _stream_layer_opts, _inner): ((), (), _) = cloned.into();
+  }
+
+  #[test]
+  fn transport_error_classifies_remote_failures() {
+    let remote_kinds = [
+      io::ErrorKind::ConnectionRefused,
+      io::ErrorKind::ConnectionReset,
+      io::ErrorKind::ConnectionAborted,
+      io::ErrorKind::BrokenPipe,
+      io::ErrorKind::TimedOut,
+      io::ErrorKind::NotConnected,
+    ];
+
+    for kind in remote_kinds {
+      let err = NetTransportError::<TestResolver>::Io(io::Error::from(kind));
+      assert!(err.is_remote_failure(), "{kind:?}");
+    }
+
+    assert!(
+      !NetTransportError::<TestResolver>::Io(io::Error::from(io::ErrorKind::Other))
+        .is_remote_failure()
+    );
+    assert!(!NetTransportError::<TestResolver>::NoPrivateIP.is_remote_failure());
+    assert!(!NetTransportError::<TestResolver>::EmptyBindAddresses.is_remote_failure());
+    assert!(
+      !NetTransportError::<TestResolver>::Custom(Cow::Borrowed("custom")).is_remote_failure()
+    );
+    assert!(matches!(
+      NetTransportError::<TestResolver>::custom(Cow::Borrowed("via-trait")),
+      NetTransportError::Custom(Cow::Borrowed("via-trait"))
+    ));
+    assert_eq!(
+      format!(
+        "{:?}",
+        NetTransportError::<TestResolver>::PacketTooLarge(70000)
+      ),
+      "packet too large, the maximum packet can be sent is 65535, got 70000"
+    );
+  }
+
+  #[test]
+  fn advertise_address_index_prefers_specific_addresses() {
+    let unspecified_v4 = SocketAddr::from(([0, 0, 0, 0], 1));
+    let specific_v4 = loopback(2);
+    let unspecified_v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 3));
+    let specific_v6 = SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], 4));
+
+    assert_eq!(
+      TestTransport::find_advertise_addr_index(&[unspecified_v4, specific_v4]),
+      1
+    );
+    assert_eq!(
+      TestTransport::find_advertise_addr_index(&[unspecified_v4, unspecified_v6]),
+      0
+    );
+    assert_eq!(
+      TestTransport::find_advertise_addr_index(&[unspecified_v4, specific_v6]),
+      1
+    );
+  }
+
+  #[test]
+  fn empty_bind_addresses_are_rejected() {
+    rt().block_on(async {
+      let opts = NetTransportOptions::<SmolStr, TestResolver, TestLayer>::with_stream_layer_options(
+        "empty".into(),
+        (),
+      );
+
+      let err = match TestTransport::new(opts).await {
+        Ok(_) => panic!("transport creation should fail without bind addresses"),
+        Err(err) => err,
+      };
+      assert!(matches!(err, NetTransportError::EmptyBindAddresses));
+    });
+  }
+
+  #[test]
+  fn new_transport_exposes_local_metadata_and_blocks_disallowed_ips() {
+    rt().block_on(async {
+      let advertise = loopback(9191);
+      let mut opts =
+        NetTransportOptions::<SmolStr, TestResolver, TestLayer>::with_stream_layer_options(
+          "metadata".into(),
+          (),
+        )
+        .with_max_packet_size(1024)
+        .with_recv_buffer_size(1024)
+        .with_cidrs_policy(CIDRsPolicy::block_all())
+        .with_advertise_address(advertise);
+      opts.add_bind_address(loopback(0));
+
+      let transport = TestTransport::new(opts).await.unwrap();
+
+      assert_eq!(transport.local_id(), "metadata");
+      assert_eq!(transport.header_overhead(), 0);
+      assert!(!transport.packet_reliable());
+      assert!(!transport.packet_secure());
+      assert!(!transport.stream_secure());
+      assert_eq!(transport.max_packet_size(), 1024);
+      assert_eq!(*transport.advertise_address(), advertise);
+      assert_eq!(transport.local_address().ip(), loopback(0).ip());
+      assert!(matches!(
+        transport.blocked_address(&loopback(8080)),
+        Err(NetTransportError::BlockedIp(_))
+      ));
+
+      transport.shutdown().await.unwrap();
+      transport.shutdown().await.unwrap();
+    });
+  }
+
+  #[test]
+  fn tcp_stream_layer_accepts_and_exchanges_bytes() {
+    rt().block_on(async {
+      let layer = <TestLayer as crate::StreamLayer>::new(()).await.unwrap();
+      let listener = layer.bind(loopback(0)).await.unwrap();
+      let local_addr = listener.local_addr();
+
+      let _copied = Tcp::<TokioRuntime>::new().clone();
+      let _defaulted = Tcp::<TokioRuntime>::default();
+      assert!(!TestLayer::is_secure());
+
+      let accept = listener.accept();
+      let connect = layer.connect(local_addr);
+      let (accepted, connected) = futures::future::join(accept, connect).await;
+      let (mut server_stream, peer_addr) = accepted.unwrap();
+      let mut client_stream = connected.unwrap();
+
+      assert_eq!(server_stream.local_addr(), local_addr);
+      assert_eq!(server_stream.peer_addr(), peer_addr);
+      assert_eq!(client_stream.peer_addr(), local_addr);
+
+      client_stream.write_all(b"ping").await.unwrap();
+      client_stream.flush().await.unwrap();
+      let mut peeked = [0; 2];
+      assert_eq!(server_stream.peek(&mut peeked).await.unwrap(), 2);
+      assert_eq!(&peeked, b"pi");
+
+      let mut read = [0; 4];
+      server_stream.read_exact(&mut read).await.unwrap();
+      assert_eq!(&read, b"ping");
+
+      server_stream.write_all(b"pong").await.unwrap();
+      server_stream.flush().await.unwrap();
+      let mut response = [0; 4];
+      client_stream.peek_exact(&mut response).await.unwrap();
+      assert_eq!(&response, b"pong");
+      client_stream.read_exact(&mut response).await.unwrap();
+      assert_eq!(&response, b"pong");
+
+      client_stream.close().await.unwrap();
+      listener.shutdown().await.unwrap();
+    });
+  }
+}
