@@ -170,6 +170,34 @@ mod encrypted_gossip_transition;
 #[path = "net/join.rs"]
 mod join;
 
+#[path = "net/join_with_labels.rs"]
+mod join_with_labels;
+
+#[path = "net/join_with_labels_and_compression.rs"]
+#[cfg(any(
+  feature = "snappy",
+  feature = "brotli",
+  feature = "zstd",
+  feature = "lz4",
+))]
+mod join_with_labels_and_compression;
+
+#[path = "net/join_with_labels_and_encryption.rs"]
+#[cfg(feature = "encryption")]
+mod join_with_labels_and_encryption;
+
+#[path = "net/join_with_labels_and_compression_and_encryption.rs"]
+#[cfg(all(
+  feature = "encryption",
+  any(
+    feature = "snappy",
+    feature = "brotli",
+    feature = "zstd",
+    feature = "lz4",
+  )
+))]
+mod join_with_labels_and_compression_and_encryption;
+
 #[path = "net/join_different_networks_unique_mask.rs"]
 mod join_different_networks_unique_mask;
 
