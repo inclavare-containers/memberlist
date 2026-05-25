@@ -65,3 +65,29 @@ pub trait NodeDelegate: Send + Sync + 'static {
     async move {}
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  struct DefaultNodeDelegate;
+
+  impl NodeDelegate for DefaultNodeDelegate {}
+
+  #[tokio::test]
+  async fn default_node_delegate_methods_are_noops() {
+    let delegate = DefaultNodeDelegate;
+
+    assert!(delegate.node_meta(8).await.is_empty());
+    delegate.notify_message(Cow::Borrowed(b"ignored")).await;
+
+    let messages = delegate
+      .broadcast_messages(32, |bytes| (bytes.len(), bytes))
+      .await
+      .collect::<Vec<_>>();
+    assert!(messages.is_empty());
+
+    assert!(delegate.local_state(true).await.is_empty());
+    delegate.merge_remote_state(b"remote", false).await;
+  }
+}

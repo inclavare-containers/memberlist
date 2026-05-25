@@ -357,6 +357,8 @@ mod tests {
   use bytes::Bytes;
   use smol_str::SmolStr;
 
+  use crate::transport::unimplemented::UnimplementedTransport;
+
   use super::*;
 
   async fn access<R: RuntimeLite>() {
@@ -396,5 +398,100 @@ mod tests {
       .build()
       .unwrap()
       .block_on(access::<agnostic_lite::tokio::TokioRuntime>());
+  }
+
+  #[tokio::test]
+  async fn packet_stream_producer_and_subscriber_state() {
+    type Transport = UnimplementedTransport<
+      SmolStr,
+      nodecraft::resolver::socket_addr::SocketAddrResolver<agnostic_lite::tokio::TokioRuntime>,
+      agnostic_lite::tokio::TokioRuntime,
+    >;
+
+    let (producer, subscriber) = packet_stream::<Transport>();
+    let timestamp = agnostic_lite::tokio::TokioRuntime::now();
+    let packet = Packet::new(
+      "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+      timestamp,
+      Bytes::from_static(b"packet"),
+    );
+
+    assert!(producer.is_empty());
+    assert!(!producer.is_full());
+    assert!(!producer.is_closed());
+    producer.try_send(packet.clone()).unwrap();
+    assert_eq!(producer.len(), 1);
+    assert_eq!(subscriber.len(), 1);
+
+    let received = subscriber.recv().await.unwrap();
+    assert_eq!(received.into_components(), packet.into_components());
+    assert!(subscriber.is_empty());
+    assert!(matches!(
+      subscriber.try_recv(),
+      Err(async_channel::TryRecvError::Empty)
+    ));
+
+    producer
+      .send(Packet::new(
+        "127.0.0.1:8081".parse::<SocketAddr>().unwrap(),
+        timestamp,
+        Bytes::from_static(b"next"),
+      ))
+      .await
+      .unwrap();
+    assert!(subscriber.recv().await.is_ok());
+    assert!(subscriber.close());
+    assert!(producer.is_closed());
+    assert!(matches!(
+      producer.try_send(Packet::new(
+        "127.0.0.1:8082".parse::<SocketAddr>().unwrap(),
+        timestamp,
+        Bytes::new(),
+      )),
+      Err(async_channel::TrySendError::Closed(_))
+    ));
+  }
+
+  #[tokio::test]
+  async fn promised_stream_producer_and_subscriber_state() {
+    type Transport = UnimplementedTransport<
+      SmolStr,
+      nodecraft::resolver::socket_addr::SocketAddrResolver<agnostic_lite::tokio::TokioRuntime>,
+      agnostic_lite::tokio::TokioRuntime,
+    >;
+
+    let (producer, subscriber) = promised_stream::<Transport>();
+    let addr = "127.0.0.1:9000".parse::<SocketAddr>().unwrap();
+
+    assert!(producer.is_empty());
+    assert!(!producer.is_full());
+    assert!(!producer.is_closed());
+    producer
+      .try_send(
+        addr,
+        crate::transport::unimplemented::UnimplementedConnection,
+      )
+      .unwrap();
+    assert_eq!(producer.len(), 1);
+    assert_eq!(subscriber.len(), 1);
+    assert!(subscriber.recv().await.is_ok());
+
+    producer
+      .send(
+        addr,
+        crate::transport::unimplemented::UnimplementedConnection,
+      )
+      .await
+      .unwrap();
+    assert!(subscriber.recv().await.is_ok());
+    assert!(subscriber.close());
+    assert!(producer.is_closed());
+    assert!(matches!(
+      producer.try_send(
+        addr,
+        crate::transport::unimplemented::UnimplementedConnection
+      ),
+      Err(async_channel::TrySendError::Closed(_))
+    ));
   }
 }
