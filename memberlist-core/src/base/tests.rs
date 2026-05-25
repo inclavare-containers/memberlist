@@ -941,6 +941,48 @@ pub async fn memberlist_send_many<T, R>(
   m2.shutdown().await.unwrap();
 }
 
+/// Unit test for API calls after leave and shutdown.
+pub async fn memberlist_api_lifecycle_errors<T, R>(t1: T::Options, t1_opts: Options)
+where
+  T: Transport<Runtime = R>,
+  R: RuntimeLite,
+{
+  let m = Memberlist::<T, _>::new(t1, t1_opts).await.unwrap();
+  let addr = m.advertise_address().clone();
+
+  assert!(m.leave(Duration::ZERO).await.unwrap());
+  assert!(!m.leave(Duration::ZERO).await.unwrap());
+  assert!(matches!(
+    m.update_node(Duration::ZERO).await,
+    Err(Error::NotRunning)
+  ));
+  assert!(matches!(
+    m.join(MaybeResolvedAddress::resolved(addr.clone())).await,
+    Err(Error::NotRunning)
+  ));
+  assert!(matches!(
+    m.join_many(std::iter::once(MaybeResolvedAddress::resolved(addr.clone())))
+      .await,
+    Err((successes, Error::NotRunning)) if successes.is_empty()
+  ));
+  assert!(matches!(
+    m.send(&addr, Bytes::from_static(b"after_leave")).await,
+    Err(Error::NotRunning)
+  ));
+  assert!(matches!(
+    m.send_reliable(&addr, Bytes::from_static(b"after_leave"))
+      .await,
+    Err(Error::NotRunning)
+  ));
+
+  m.shutdown().await.unwrap();
+  assert!(!m.leave(Duration::ZERO).await.unwrap());
+  assert!(matches!(
+    m.join(MaybeResolvedAddress::resolved(addr.clone())).await,
+    Err(Error::NotRunning)
+  ));
+}
+
 /// Unit tests for leave
 pub async fn memberlist_leave<T, R>(
   t1: T::Options,

@@ -115,6 +115,9 @@ mod alive_node_change_meta;
 #[path = "net/alive_node_refute.rs"]
 mod alive_node_refute;
 
+#[path = "net/api_lifecycle_errors.rs"]
+mod api_lifecycle_errors;
+
 #[path = "net/suspect_node_no_node.rs"]
 mod suspect_node_no_node;
 
