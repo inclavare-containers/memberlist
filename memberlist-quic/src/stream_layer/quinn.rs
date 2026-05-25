@@ -346,7 +346,7 @@ impl QuicConnection for QuinnConnection {
   }
 
   async fn send_datagram(&self, data: bytes::Bytes) -> io::Result<()> {
-    self.conn.send_datagram(data).map_err(|e| {
+    self.conn.send_datagram_wait(data).await.map_err(|e| {
       io::Error::new(
         io::ErrorKind::Other,
         format!("failed to send datagram: {e}"),

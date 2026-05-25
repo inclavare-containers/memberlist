@@ -41,6 +41,10 @@ pub use options::*;
 pub mod stream_layer;
 use stream_layer::*;
 
+// Keep packet payloads below the common QUIC minimum datagram size so a burst
+// of gossip messages does not exceed Quinn's datagram buffering too easily.
+const MAX_QUIC_DATAGRAM_SIZE: usize = 1200;
+
 #[cfg(feature = "tokio")]
 /// [`QuicTransport`] based on [`tokio`](https://crates.io/crates/tokio).
 pub type TokioQuicTransport<I, A, S> = QuicTransport<I, A, S, agnostic_lite::tokio::TokioRuntime>;
@@ -207,7 +211,10 @@ where
       advertise_addr: final_advertise_addr,
       connection_pool,
       local_addr: self_addr,
-      max_packet_size: opts.max_packet_size.min(stream_layer.max_stream_data()),
+      max_packet_size: opts
+        .max_packet_size
+        .min(stream_layer.max_stream_data())
+        .min(MAX_QUIC_DATAGRAM_SIZE),
       opts,
       packet_rx,
       stream_rx,
@@ -299,7 +306,7 @@ where
   async fn fetch_connection(
     &self,
     addr: SocketAddr,
-    _deadline: Option<R::Instant>,
+    deadline: Option<R::Instant>,
   ) -> Result<S::Connection, QuicTransportError<A>> {
     if let Some(ent) = self.connection_pool.get(&addr) {
       let (_, connection) = ent.value();
@@ -309,7 +316,12 @@ where
     }
 
     let connector = self.next_connector(&addr);
-    let connection = connector.connect(addr).await?;
+    let connection = match deadline {
+      Some(deadline) => R::timeout_at(deadline, connector.connect(addr))
+        .await
+        .map_err(std::io::Error::from)??,
+      None => connector.connect(addr).await?,
+    };
     self
       .connection_pool
       .insert(addr, (Instant::now(), connection.clone()));
@@ -402,7 +414,7 @@ where
 
   #[inline]
   fn header_overhead(&self) -> usize {
-    1
+    0
   }
 
   fn blocked_address(
@@ -519,7 +531,7 @@ where
 
   #[inline]
   fn packet_reliable(&self) -> bool {
-    true
+    false
   }
 
   #[inline]

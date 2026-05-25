@@ -341,6 +341,13 @@ mod unit_tests {
     payload
   }
 
+  fn payload_with_header(header: &[u8], data: &[u8]) -> Payload {
+    let mut payload = Payload::new(header.len(), data.len());
+    payload.header_mut().copy_from_slice(header);
+    payload.data_mut().copy_from_slice(data);
+    payload
+  }
+
   fn loopback(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
   }
@@ -553,8 +560,8 @@ mod unit_tests {
       let transport = TestTransport::new(opts).await.unwrap();
 
       assert_eq!(transport.local_id(), "metadata");
-      assert_eq!(transport.header_overhead(), 1);
-      assert!(transport.packet_reliable());
+      assert_eq!(transport.header_overhead(), 0);
+      assert!(!transport.packet_reliable());
       assert!(transport.packet_secure());
       assert!(transport.stream_secure());
       assert!(transport.max_packet_size() <= 1024);
@@ -584,10 +591,13 @@ mod unit_tests {
       let sent_at = TokioRuntime::now();
 
       let (len, timestamp) = t1
-        .send_to(t2.advertise_address(), payload(b"hello"))
+        .send_to(
+          t2.advertise_address(),
+          payload_with_header(b"ignored", b"hello"),
+        )
         .await
         .unwrap();
-      assert_eq!(len, 5);
+      assert_eq!(len, 12);
       assert!(timestamp >= sent_at);
 
       let packet = TokioRuntime::timeout(Duration::from_secs(2), t2.packet().recv())
@@ -596,7 +606,7 @@ mod unit_tests {
         .unwrap();
       let (from, _, bytes) = packet.into_components();
       assert_eq!(from, *t1.advertise_address());
-      assert_eq!(bytes, Bytes::from_static(b"hello"));
+      assert_eq!(bytes, Bytes::from_static(b"ignoredhello"));
 
       t1.shutdown().await.unwrap();
       t2.shutdown().await.unwrap();
