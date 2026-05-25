@@ -103,3 +103,32 @@ fn test_awareness() {
     assert_eq!(a.scale_timeout(Duration::from_secs(1)), timeout);
   }
 }
+
+#[cfg(test)]
+#[test]
+fn test_awareness_clone_shares_score() {
+  let a = Awareness::new(
+    4,
+    #[cfg(feature = "metrics")]
+    Arc::new(vec![]),
+  );
+  let cloned = a.clone();
+
+  a.apply_delta(2);
+  assert_eq!(cloned.get_health_score(), 2);
+  assert_eq!(
+    cloned.scale_timeout(Duration::from_millis(5)),
+    Duration::from_millis(15)
+  );
+
+  cloned.apply_delta(10);
+  assert_eq!(a.get_health_score(), 3);
+  assert_eq!(
+    a.scale_timeout(Duration::from_millis(5)),
+    Duration::from_millis(20)
+  );
+
+  a.apply_delta(-10);
+  assert_eq!(cloned.get_health_score(), 0);
+  assert_eq!(cloned.scale_timeout(Duration::ZERO), Duration::ZERO);
+}

@@ -202,6 +202,47 @@ mod tests {
   }
 
   #[test]
+  fn test_with_keys_filters_primary_and_duplicates() {
+    let keyring = Keyring::with_keys(
+      TEST_KEYS[1],
+      [
+        TEST_KEYS[0],
+        TEST_KEYS[1],
+        TEST_KEYS[2],
+        TEST_KEYS[0],
+        TEST_KEYS[2],
+      ]
+      .into_iter(),
+    );
+
+    let keys = keyring.keys().collect::<Vec<_>>();
+    assert_eq!(keys, vec![TEST_KEYS[1], TEST_KEYS[0], TEST_KEYS[2]]);
+    assert_eq!(keyring.inner.read().keys.len(), 2);
+  }
+
+  #[test]
+  fn test_use_primary_key_is_noop() {
+    let keyring = Keyring::with_keys(TEST_KEYS[1], [TEST_KEYS[0], TEST_KEYS[2]].into_iter());
+    let before = keyring.keys().collect::<Vec<_>>();
+
+    keyring.use_key(&TEST_KEYS[1]).unwrap();
+
+    assert_eq!(keyring.keys().collect::<Vec<_>>(), before);
+  }
+
+  #[test]
+  fn test_remove_missing_key_is_noop() {
+    let keyring = Keyring::with_keys(TEST_KEYS[1], [TEST_KEYS[0]].into_iter());
+
+    keyring.remove(&TEST_KEYS[2]).unwrap();
+
+    assert_eq!(
+      keyring.keys().collect::<Vec<_>>(),
+      vec![TEST_KEYS[1], TEST_KEYS[0]]
+    );
+  }
+
+  #[test]
   fn test_insert_remove_use() {
     let keyring = Keyring::new(TEST_KEYS[1]);
 
