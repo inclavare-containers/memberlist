@@ -266,3 +266,106 @@ fn format_multiple_errors<T: Transport, D: Delegate>(errors: &[Error<T, D>]) -> 
     .collect::<Vec<_>>()
     .join("\n")
 }
+
+#[cfg(test)]
+mod tests {
+  use std::net::SocketAddr;
+
+  use futures::stream;
+  use memberlist_proto::MessageType;
+  use nodecraft::resolver::socket_addr::SocketAddrResolver;
+  use smallvec_wrapper::OneOrMore;
+  use smol_str::SmolStr;
+
+  use super::*;
+  use crate::{delegate::VoidDelegate, transport::unimplemented::UnimplementedTransport};
+
+  type TestTransport = UnimplementedTransport<
+    SmolStr,
+    SocketAddrResolver<agnostic::tokio::TokioRuntime>,
+    agnostic::tokio::TokioRuntime,
+  >;
+  type TestDelegate = VoidDelegate<SmolStr, SocketAddr>;
+  type TestError = Error<TestTransport, TestDelegate>;
+
+  #[test]
+  fn from_iter_preserves_none_single_and_multiple() {
+    let none = Vec::<TestError>::new().into_iter().collect::<Option<_>>();
+    assert!(none.is_none());
+
+    let single = [TestError::custom("single".into())]
+      .into_iter()
+      .collect::<Option<_>>()
+      .unwrap();
+    assert_eq!(single.to_string(), "single");
+    assert_eq!(single.iter().count(), 1);
+
+    let multiple = [
+      TestError::custom("first".into()),
+      TestError::sequence_number_mismatch(7, 9),
+    ]
+    .into_iter()
+    .collect::<Option<_>>()
+    .unwrap();
+    assert_eq!(multiple.iter().count(), 2);
+    assert_eq!(
+      multiple.to_string(),
+      "errors:\n  1. first\n  2. sequence number mismatch: ping(7), ack(9)"
+    );
+  }
+
+  #[test]
+  fn constructors_and_debug_use_display_messages() {
+    let unexpected = TestError::unexpected_message(MessageType::Ack, MessageType::Ping);
+    assert_eq!(
+      format!("{unexpected:?}"),
+      "unexpected message: expected Ack, got Ping"
+    );
+
+    let remote = TestError::remote(ErrorResponse::new("remote failed"));
+    assert_eq!(remote.to_string(), "remote error: remote failed");
+
+    let unknown = TestError::UnknownMessageType(255);
+    assert_eq!(unknown.to_string(), "unknown message type value 255");
+  }
+
+  #[test]
+  fn try_from_one_or_more_returns_ok_single_or_multiple() {
+    let empty = OneOrMore::<TestError>::new();
+    assert!(TestError::try_from_one_or_more(empty).is_ok());
+
+    let mut single = OneOrMore::new();
+    single.push(TestError::custom("only".into()));
+    assert_eq!(
+      TestError::try_from_one_or_more(single)
+        .unwrap_err()
+        .to_string(),
+      "only"
+    );
+
+    let mut multiple = OneOrMore::new();
+    multiple.push(TestError::custom("one".into()));
+    multiple.push(TestError::custom("two".into()));
+    assert_eq!(
+      TestError::try_from_one_or_more(multiple)
+        .unwrap_err()
+        .to_string(),
+      "errors:\n  1. one\n  2. two"
+    );
+  }
+
+  #[tokio::test]
+  async fn try_from_stream_collects_errors() {
+    assert!(TestError::try_from_stream(stream::empty()).await.is_ok());
+
+    let err = TestError::try_from_stream(stream::iter([
+      TestError::custom("stream one".into()),
+      TestError::custom("stream two".into()),
+    ]))
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.iter().count(), 2);
+    assert_eq!(err.to_string(), "errors:\n  1. stream one\n  2. stream two");
+  }
+}

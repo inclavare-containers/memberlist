@@ -340,3 +340,63 @@ fn test_retransmit_limit() {
   let lim = retransmit_limit(3, 99);
   assert_eq!(lim, 6, "bad val {lim}");
 }
+
+#[test]
+fn test_ipv4_global_ip_classification() {
+  use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+
+  let global = Ipv4Addr::new(8, 8, 8, 8);
+  assert!(global.is_global_ip());
+  assert!(IpAddr::V4(global).is_global_ip());
+  assert!(SocketAddrV4::new(global, 7946).is_global_ip());
+  assert!(SocketAddr::from((global, 7946)).is_global_ip());
+
+  for addr in [
+    Ipv4Addr::UNSPECIFIED,
+    Ipv4Addr::new(10, 0, 0, 1),
+    Ipv4Addr::new(100, 64, 0, 1),
+    Ipv4Addr::LOCALHOST,
+    Ipv4Addr::new(169, 254, 1, 1),
+    Ipv4Addr::new(192, 0, 0, 1),
+    Ipv4Addr::new(192, 0, 2, 1),
+    Ipv4Addr::new(198, 18, 0, 1),
+    Ipv4Addr::new(240, 0, 0, 1),
+    Ipv4Addr::BROADCAST,
+  ] {
+    assert!(!addr.is_global_ip(), "{addr} should not be global");
+  }
+}
+
+#[test]
+fn test_ipv6_global_ip_classification() {
+  use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6};
+
+  let global = Ipv6Addr::new(0x2606, 0x4700, 0x4700, 0, 0, 0, 0, 0x1111);
+  assert!(global.is_global_ip());
+  assert!(IpAddr::V6(global).is_global_ip());
+  assert!(SocketAddrV6::new(global, 7946, 0, 0).is_global_ip());
+  assert!(SocketAddr::from((global, 7946)).is_global_ip());
+
+  for addr in [
+    Ipv6Addr::UNSPECIFIED,
+    Ipv6Addr::LOCALHOST,
+    "::ffff:192.0.2.1".parse().unwrap(),
+    "64:ff9b:1::1".parse().unwrap(),
+    "100::1".parse().unwrap(),
+    "2001:db8::1".parse().unwrap(),
+    "fc00::1".parse().unwrap(),
+    "fe80::1".parse().unwrap(),
+  ] {
+    assert!(!addr.is_global_ip(), "{addr} should not be global");
+  }
+
+  for addr in [
+    "2001:1::1".parse::<Ipv6Addr>().unwrap(),
+    "2001:1::2".parse::<Ipv6Addr>().unwrap(),
+    "2001:3::1".parse::<Ipv6Addr>().unwrap(),
+    "2001:4:112::1".parse::<Ipv6Addr>().unwrap(),
+    "2001:20::1".parse::<Ipv6Addr>().unwrap(),
+  ] {
+    assert!(addr.is_global_ip(), "{addr} should be global");
+  }
+}

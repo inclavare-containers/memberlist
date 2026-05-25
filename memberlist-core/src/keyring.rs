@@ -243,6 +243,44 @@ mod tests {
   }
 
   #[test]
+  fn test_insert_duplicate_is_noop() {
+    let keyring = Keyring::with_keys(TEST_KEYS[1], [TEST_KEYS[0]].into_iter());
+
+    keyring.insert(TEST_KEYS[0]);
+    keyring.insert(TEST_KEYS[2]);
+    keyring.insert(TEST_KEYS[2]);
+
+    assert_eq!(
+      keyring.keys().collect::<Vec<_>>(),
+      vec![TEST_KEYS[1], TEST_KEYS[0], TEST_KEYS[2]]
+    );
+  }
+
+  #[test]
+  fn test_use_key_moves_old_primary_to_secondary() {
+    let keyring = Keyring::with_keys(TEST_KEYS[1], [TEST_KEYS[0], TEST_KEYS[2]].into_iter());
+
+    keyring.use_key(&TEST_KEYS[0]).unwrap();
+
+    let keys = keyring.keys().collect::<Vec<_>>();
+    assert_eq!(keys[0], TEST_KEYS[0]);
+    assert!(keys[1..].contains(&TEST_KEYS[1]));
+    assert!(keys[1..].contains(&TEST_KEYS[2]));
+  }
+
+  #[test]
+  fn test_error_display_messages() {
+    assert_eq!(
+      KeyringError::SecretKeyNotFound.to_string(),
+      "secret key is not in the keyring"
+    );
+    assert_eq!(
+      KeyringError::RemovePrimaryKey.to_string(),
+      "removing the primary key is not allowed"
+    );
+  }
+
+  #[test]
   fn test_insert_remove_use() {
     let keyring = Keyring::new(TEST_KEYS[1]);
 
