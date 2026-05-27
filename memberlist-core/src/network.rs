@@ -488,22 +488,22 @@ mod tests {
 
     async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
       let _ = buf;
-      unimplemented!()
+      Ok(0)
     }
 
     async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
       let _ = buf;
-      unimplemented!()
+      Ok(())
     }
 
     async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
       let _ = buf;
-      unimplemented!()
+      Ok(0)
     }
 
     async fn peek_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
       let _ = buf;
-      unimplemented!()
+      Ok(())
     }
 
     async fn write_all(&mut self, payload: &[u8]) -> io::Result<()> {
@@ -645,6 +645,66 @@ mod tests {
     )
     .await
     .unwrap()
+  }
+
+  #[tokio::test]
+  async fn fake_transport_fixture_contracts_are_exercised() {
+    let fail_send = Arc::new(AtomicBool::new(false));
+    let sent_packets = Arc::new(AtomicUsize::new(0));
+    let transport = TestTransport::new(fail_send.clone(), sent_packets.clone());
+    let addr = SocketAddr::from(([127, 0, 0, 1], 9000));
+
+    let created = <TestTransport as Transport>::new(()).await.unwrap();
+    assert_eq!(created.local_id(), "local");
+    assert_eq!(transport.resolve(&addr).await.unwrap(), addr);
+    assert_eq!(transport.local_id(), "local");
+    assert_eq!(
+      *transport.local_address(),
+      SocketAddr::from(([127, 0, 0, 1], 7946))
+    );
+    assert_eq!(
+      *transport.advertise_address(),
+      SocketAddr::from(([127, 0, 0, 1], 7946))
+    );
+    assert_eq!(transport.max_packet_size(), 256);
+    assert_eq!(transport.header_overhead(), 3);
+    assert!(transport.blocked_address(&addr).is_ok());
+    assert!(!transport.packet_reliable());
+    assert!(!transport.packet_secure());
+    assert!(!transport.stream_secure());
+
+    let (_reader, mut writer) = transport.open(&addr, Runtime::now()).await.unwrap().split();
+    let mut conn = TestConnection::default();
+    let mut buf = [0; 1];
+    assert_eq!(conn.read(&mut buf).await.unwrap(), 0);
+    conn.read_exact(&mut buf).await.unwrap();
+    assert_eq!(conn.peek(&mut buf).await.unwrap(), 0);
+    conn.peek_exact(&mut buf).await.unwrap();
+    conn.write_all(b"x").await.unwrap();
+    conn.flush().await.unwrap();
+    conn.close().await.unwrap();
+
+    writer.write_all(b"writer").await.unwrap();
+    writer.flush().await.unwrap();
+    writer.close().await.unwrap();
+
+    let packet_subscriber = transport.packet();
+    assert!(packet_subscriber.is_closed());
+    let stream_subscriber = transport.stream();
+    assert!(stream_subscriber.is_closed());
+
+    let mut payload = Payload::new(0, 4);
+    payload.data_mut().copy_from_slice(b"ping");
+    assert_eq!(transport.send_to(&addr, payload).await.unwrap().0, 4);
+    assert_eq!(sent_packets.load(Ordering::SeqCst), 1);
+
+    fail_send.store(true, Ordering::SeqCst);
+    let err = transport
+      .send_to(&addr, Payload::new(0, 0))
+      .await
+      .unwrap_err();
+    assert!(err.is_remote_failure());
+    transport.shutdown().await.unwrap();
   }
 
   #[tokio::test]
