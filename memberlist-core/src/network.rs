@@ -71,17 +71,17 @@ where
       // past the message type tag, the buffer starts with a varint length
       // prefix. Decode and skip it so decode_sequence_number reads the raw
       // Ack fields.
-      let (len_bytes, ack_len) =
-        varing::decode_u32_varint(&msg).map_err(|e| Error::custom(format!("decode ack length: {}", e).into()))?;
-      let ack_len =
-        usize::try_from(ack_len).map_err(|_| Error::custom("decode ack length: length does not fit in usize".into()))?;
+      let (len_bytes, ack_len) = varing::decode_u32_varint(&msg)
+        .map_err(|e| Error::custom(format!("decode ack length: {}", e).into()))?;
+      let ack_len = usize::try_from(ack_len)
+        .map_err(|_| Error::custom("decode ack length: length does not fit in usize".into()))?;
       let start = len_bytes.get();
-      let end = start
-        .checked_add(ack_len)
-        .ok_or_else(|| Error::custom("decode ack length: overflow computing ack payload range".into()))?;
-      let ack_data = msg
-        .get(start..end)
-        .ok_or_else(|| Error::custom("decode ack length: ack payload exceeds message buffer".into()))?;
+      let end = start.checked_add(ack_len).ok_or_else(|| {
+        Error::custom("decode ack length: overflow computing ack payload range".into())
+      })?;
+      let ack_data = msg.get(start..end).ok_or_else(|| {
+        Error::custom("decode ack length: ack payload exceeds message buffer".into())
+      })?;
       let seqn = match Ack::decode_sequence_number(ack_data) {
         Ok(seqn) => seqn.1,
         Err(e) => return Err(e.into()),
@@ -415,5 +415,304 @@ where
     D: Delegate,
   {
     Err(e)
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::{
+    borrow::Cow,
+    io,
+    net::SocketAddr,
+    sync::{
+      Arc,
+      atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+  };
+
+  use bytes::Bytes;
+  use futures::{StreamExt, io::Cursor};
+  use nodecraft::resolver::socket_addr::SocketAddrResolver;
+  use smol_str::SmolStr;
+
+  use crate::{
+    Options,
+    delegate::VoidDelegate,
+    proto::{Payload, ProtoWriter},
+    tests::get_memberlist,
+    transport::{
+      Connection, PacketSubscriber, StreamSubscriber, TransportError, packet_stream,
+      promised_stream, unimplemented::UnimplementedReader,
+    },
+  };
+
+  use super::*;
+
+  type Runtime = agnostic_lite::tokio::TokioRuntime;
+  type Resolver = SocketAddrResolver<Runtime>;
+  type TestDelegate = VoidDelegate<SmolStr, SocketAddr>;
+
+  #[derive(Debug, thiserror::Error)]
+  #[error("{0}")]
+  struct TestError(Cow<'static, str>);
+
+  impl From<io::Error> for TestError {
+    fn from(err: io::Error) -> Self {
+      Self(Cow::Owned(err.to_string()))
+    }
+  }
+
+  impl TransportError for TestError {
+    fn is_remote_failure(&self) -> bool {
+      true
+    }
+
+    fn custom(err: Cow<'static, str>) -> Self {
+      Self(err)
+    }
+  }
+
+  #[derive(Default)]
+  struct TestConnection {
+    reader: UnimplementedReader,
+    writer: Cursor<Vec<u8>>,
+  }
+
+  impl Connection for TestConnection {
+    type Reader = UnimplementedReader;
+    type Writer = Cursor<Vec<u8>>;
+
+    fn split(self) -> (Self::Reader, Self::Writer) {
+      (self.reader, self.writer)
+    }
+
+    async fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+      let _ = buf;
+      unimplemented!()
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+      let _ = buf;
+      unimplemented!()
+    }
+
+    async fn peek(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+      let _ = buf;
+      unimplemented!()
+    }
+
+    async fn peek_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+      let _ = buf;
+      unimplemented!()
+    }
+
+    async fn write_all(&mut self, payload: &[u8]) -> io::Result<()> {
+      self.writer.write_all(payload).await
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+      self.writer.flush().await
+    }
+
+    async fn close(&mut self) -> io::Result<()> {
+      self.writer.close().await
+    }
+  }
+
+  struct TestTransport {
+    id: SmolStr,
+    addr: SocketAddr,
+    fail_send: Arc<AtomicBool>,
+    sent_packets: Arc<AtomicUsize>,
+  }
+
+  impl TestTransport {
+    fn new(fail_send: Arc<AtomicBool>, sent_packets: Arc<AtomicUsize>) -> Self {
+      Self {
+        id: "local".into(),
+        addr: SocketAddr::from(([127, 0, 0, 1], 7946)),
+        fail_send,
+        sent_packets,
+      }
+    }
+  }
+
+  impl Transport for TestTransport {
+    type Error = TestError;
+    type Id = SmolStr;
+    type Address = SocketAddr;
+    type ResolvedAddress = SocketAddr;
+    type Resolver = Resolver;
+    type Connection = TestConnection;
+    type Runtime = Runtime;
+    type Options = ();
+
+    async fn new(_: Self::Options) -> Result<Self, Self::Error> {
+      Ok(Self::new(
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicUsize::new(0)),
+      ))
+    }
+
+    async fn resolve(&self, addr: &Self::Address) -> Result<Self::ResolvedAddress, Self::Error> {
+      Ok(*addr)
+    }
+
+    fn local_id(&self) -> &Self::Id {
+      &self.id
+    }
+
+    fn local_address(&self) -> &Self::Address {
+      &self.addr
+    }
+
+    fn advertise_address(&self) -> &Self::ResolvedAddress {
+      &self.addr
+    }
+
+    fn max_packet_size(&self) -> usize {
+      256
+    }
+
+    fn header_overhead(&self) -> usize {
+      3
+    }
+
+    fn blocked_address(&self, _: &Self::ResolvedAddress) -> Result<(), Self::Error> {
+      Ok(())
+    }
+
+    async fn send_to(
+      &self,
+      _: &Self::ResolvedAddress,
+      packet: Payload,
+    ) -> Result<(usize, <Self::Runtime as RuntimeLite>::Instant), Self::Error> {
+      if self.fail_send.load(Ordering::SeqCst) {
+        return Err(TestError::custom(Cow::Borrowed("send failed")));
+      }
+
+      self.sent_packets.fetch_add(1, Ordering::SeqCst);
+      Ok((packet.as_slice().len(), Runtime::now()))
+    }
+
+    async fn open(
+      &self,
+      _: &Self::ResolvedAddress,
+      _: <Self::Runtime as RuntimeLite>::Instant,
+    ) -> Result<Self::Connection, Self::Error> {
+      Ok(TestConnection::default())
+    }
+
+    fn packet(
+      &self,
+    ) -> PacketSubscriber<Self::ResolvedAddress, <Self::Runtime as RuntimeLite>::Instant> {
+      let (producer, subscriber) = packet_stream::<Self>();
+      producer.close();
+      subscriber
+    }
+
+    fn stream(&self) -> StreamSubscriber<Self::ResolvedAddress, Self::Connection> {
+      let (producer, subscriber) = promised_stream::<Self>();
+      producer.close();
+      subscriber
+    }
+
+    fn packet_reliable(&self) -> bool {
+      false
+    }
+
+    fn packet_secure(&self) -> bool {
+      false
+    }
+
+    fn stream_secure(&self) -> bool {
+      false
+    }
+
+    async fn shutdown(&self) -> Result<(), Self::Error> {
+      Ok(())
+    }
+  }
+
+  async fn test_memberlist(
+    fail_send: Arc<AtomicBool>,
+    sent_packets: Arc<AtomicUsize>,
+  ) -> Memberlist<TestTransport, TestDelegate> {
+    get_memberlist(
+      TestTransport::new(fail_send, sent_packets),
+      TestDelegate::default(),
+      Options::default(),
+    )
+    .await
+    .unwrap()
+  }
+
+  #[tokio::test]
+  async fn encoders_use_transport_limits_and_options() {
+    let memberlist = test_memberlist(
+      Arc::new(AtomicBool::new(false)),
+      Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let messages = [Message::UserData(Bytes::from_static(b"payload"))];
+
+    let unreliable = memberlist.unreliable_encoder(messages.clone());
+    assert_eq!(unreliable.overhead(), 3);
+    assert_eq!(unreliable.messages().as_ref().len(), 1);
+    assert!(unreliable.hint().is_ok());
+
+    let reliable = memberlist.reliable_encoder(messages);
+    assert_eq!(reliable.overhead(), 3);
+    assert_eq!(reliable.messages().as_ref().len(), 1);
+    assert!(reliable.hint().is_ok());
+
+    memberlist.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn transport_send_packets_forwards_successes_and_errors() {
+    let fail_send = Arc::new(AtomicBool::new(false));
+    let sent_packets = Arc::new(AtomicUsize::new(0));
+    let memberlist = test_memberlist(fail_send.clone(), sent_packets.clone()).await;
+    let target = SocketAddr::from(([127, 0, 0, 1], 9000));
+
+    let stream = memberlist
+      .transport_send_packets(&target, [Message::UserData(Bytes::from_static(b"ok"))])
+      .await;
+    let results = stream.collect::<Vec<_>>().await;
+    assert_eq!(results.len(), 1);
+    assert!(results.into_iter().all(|res| res.is_ok()));
+    assert_eq!(sent_packets.load(Ordering::SeqCst), 1);
+
+    fail_send.store(true, Ordering::SeqCst);
+    let stream = memberlist
+      .transport_send_packets(&target, [Message::UserData(Bytes::from_static(b"fail"))])
+      .await;
+    let results = stream.collect::<Vec<_>>().await;
+    assert_eq!(results.len(), 1);
+    assert!(matches!(results.into_iter().next(), Some(Err(_))));
+
+    memberlist.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn send_message_writes_encoded_payloads_to_connection() {
+    let memberlist = test_memberlist(
+      Arc::new(AtomicBool::new(false)),
+      Arc::new(AtomicUsize::new(0)),
+    )
+    .await;
+    let (_, mut writer) = TestConnection::default().split();
+
+    memberlist
+      .send_message(
+        &mut writer,
+        [Message::UserData(Bytes::from_static(b"stream"))],
+      )
+      .await
+      .unwrap();
+
+    assert!(writer.position() > 0);
+    memberlist.shutdown().await.unwrap();
   }
 }
