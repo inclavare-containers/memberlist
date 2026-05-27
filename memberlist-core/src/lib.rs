@@ -370,3 +370,59 @@ pub mod tests {
       .map(|(_, _, this)| this)
   }
 }
+
+#[cfg(test)]
+mod unit_tests {
+  use super::*;
+
+  #[test]
+  fn epoch_supports_time_arithmetic_and_debug() {
+    let start = Epoch::now();
+    let later = start + Duration::from_millis(5);
+
+    assert_eq!(later - start, Duration::from_millis(5));
+    assert_eq!(
+      later.checked_duration_since(start),
+      Some(Duration::from_millis(5))
+    );
+    assert!(start.checked_duration_since(later).is_none());
+    assert!(!format!("{start:?}").is_empty());
+
+    let mut adjusted = later;
+    adjusted -= Duration::from_millis(2);
+    adjusted += Duration::from_millis(2);
+    assert_eq!(adjusted - start, Duration::from_millis(5));
+    assert!(adjusted.elapsed() <= Duration::from_secs(1));
+  }
+
+  #[cfg(feature = "test")]
+  #[test]
+  fn test_address_helpers_generate_expected_loopback_addresses() {
+    use crate::tests::{AddressKind, next_socket_addr_v4, next_socket_addr_v6};
+
+    assert_eq!(AddressKind::V4.to_string(), "v4");
+    assert_eq!(AddressKind::V6.to_string(), "v6");
+
+    let v4 = next_socket_addr_v4(42);
+    assert!(v4.is_ipv4());
+    assert_eq!(v4.port(), 0);
+    assert_eq!(v4.ip().to_string().split('.').nth(2), Some("42"));
+
+    let v4_from_kind = AddressKind::V4.next(43);
+    assert!(v4_from_kind.is_ipv4());
+    assert_eq!(v4_from_kind.ip().to_string().split('.').nth(2), Some("43"));
+
+    let v6 = next_socket_addr_v6();
+    assert!(v6.is_ipv6());
+    assert_eq!(v6.port(), 0);
+
+    let v6_from_kind = AddressKind::V6.next(0);
+    assert!(v6_from_kind.is_ipv6());
+  }
+
+  #[cfg(feature = "test")]
+  #[test]
+  fn test_run_executes_future_with_supplied_block_on() {
+    crate::tests::run(futures::executor::block_on, async {});
+  }
+}

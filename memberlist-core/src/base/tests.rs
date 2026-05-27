@@ -16,6 +16,166 @@ use crate::{
 
 use super::*;
 
+#[cfg(test)]
+mod local_tests {
+  use std::{
+    sync::{Arc, atomic::AtomicU32},
+    time::Duration,
+  };
+
+  use nodecraft::{Node, resolver::socket_addr::SocketAddrResolver};
+  use rand::{SeedableRng, seq::SliceRandom};
+  use smol_str::SmolStr;
+
+  use crate::{Epoch, delegate::VoidDelegate, transport::unimplemented::UnimplementedTransport};
+
+  use super::*;
+
+  type Runtime = agnostic_lite::tokio::TokioRuntime;
+  type Resolver = SocketAddrResolver<Runtime>;
+  type TestTransport = UnimplementedTransport<SmolStr, Resolver, Runtime>;
+  type TestDelegate = VoidDelegate<SmolStr, SocketAddr>;
+  type TestMember = Member<TestTransport, TestDelegate>;
+  type TestMembers = Members<TestTransport, TestDelegate>;
+
+  fn addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], port))
+  }
+
+  fn local_state(name: &str, port: u16, state: State) -> LocalNodeState<SmolStr, SocketAddr> {
+    LocalNodeState {
+      server: Arc::new(NodeState::new(name.into(), addr(port), state)),
+      incarnation: Arc::new(AtomicU32::new(7)),
+      state_change: Epoch::now(),
+      state,
+    }
+  }
+
+  fn member(name: &str, port: u16, state: State) -> TestMember {
+    Member {
+      state: local_state(name, port, state),
+      suspicion: None,
+    }
+  }
+
+  fn insert_member(members: &mut TestMembers, item: TestMember) {
+    let idx = members.nodes.len();
+    members.node_map.insert(item.id().clone(), idx);
+    members.nodes.push(item);
+  }
+
+  #[test]
+  fn hot_data_new_initializes_all_counters_and_flags() {
+    let hot = HotData::new();
+
+    assert_eq!(hot.sequence_num.load(Ordering::SeqCst), 0);
+    assert_eq!(hot.incarnation.load(Ordering::SeqCst), 0);
+    assert_eq!(hot.push_pull_req.load(Ordering::SeqCst), 0);
+    assert_eq!(hot.num_nodes.load(Ordering::SeqCst), 0);
+    assert!(!hot.leave.load(Ordering::SeqCst));
+  }
+
+  #[test]
+  fn message_queue_new_starts_with_empty_priority_queues() {
+    let queue = MessageQueue::<SmolStr, SocketAddr>::new();
+
+    assert!(queue.high.is_empty());
+    assert!(queue.low.is_empty());
+  }
+
+  #[test]
+  fn member_debug_and_deref_expose_local_state() {
+    let item = member("node-a", 1001, State::Alive);
+
+    assert_eq!(item.id(), "node-a");
+    assert_eq!(item.incarnation().load(Ordering::SeqCst), 7);
+    assert!(format!("{item:?}").contains("LocalNodeState"));
+  }
+
+  #[test]
+  fn members_new_starts_empty_and_tracks_local_node() {
+    let local = Node::new(SmolStr::new("local"), addr(1000));
+    let members = TestMembers::new(local.clone());
+
+    assert_eq!(members.local, local);
+    assert!(members.nodes.is_empty());
+    assert!(members.node_map.is_empty());
+    assert!(!members.any_alive());
+  }
+
+  #[test]
+  fn members_any_alive_ignores_local_dead_and_left_nodes() {
+    let mut members = TestMembers::new(Node::new(SmolStr::new("local"), addr(1000)));
+
+    insert_member(&mut members, member("local", 1000, State::Alive));
+    insert_member(&mut members, member("dead", 1001, State::Dead));
+    insert_member(&mut members, member("left", 1002, State::Left));
+
+    assert!(!members.any_alive());
+
+    insert_member(&mut members, member("suspect", 1003, State::Suspect));
+
+    assert!(members.any_alive());
+  }
+
+  #[test]
+  fn members_get_and_set_state_use_node_map_indices() {
+    let mut members = TestMembers::new(Node::new(SmolStr::new("local"), addr(1000)));
+    insert_member(&mut members, member("node-a", 1001, State::Alive));
+    insert_member(&mut members, member("node-b", 1002, State::Suspect));
+    let node_a = SmolStr::new("node-a");
+    let node_b = SmolStr::new("node-b");
+    let missing = SmolStr::new("missing");
+
+    assert_eq!(members.get_state(&node_a).unwrap().state, State::Alive);
+    assert!(members.get_state(&missing).is_none());
+
+    members.set_state(&node_a, State::Dead);
+    members.set_state(&missing, State::Left);
+
+    assert_eq!(members.get_state(&node_a).unwrap().state, State::Dead);
+    assert_eq!(members.get_state(&node_b).unwrap().state, State::Suspect);
+  }
+
+  #[test]
+  fn members_index_mut_and_shuffle_keep_node_map_consistent() {
+    let mut members = TestMembers::new(Node::new(SmolStr::new("local"), addr(1000)));
+    for (idx, name) in ["node-a", "node-b", "node-c", "node-d"]
+      .into_iter()
+      .enumerate()
+    {
+      insert_member(&mut members, member(name, 1001 + idx as u16, State::Alive));
+    }
+
+    members[1].state.state = State::Suspect;
+    assert_eq!(
+      members.get_state(&SmolStr::new("node-b")).unwrap().state,
+      State::Suspect
+    );
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0x5eed);
+    members.shuffle(&mut rng);
+
+    for (idx, item) in members.nodes.iter().enumerate() {
+      assert_eq!(members.node_map.get(item.id()), Some(&idx));
+    }
+  }
+
+  #[test]
+  fn epoch_arithmetic_reports_monotonic_offsets() {
+    let now = Epoch::now();
+    let earlier = now - Duration::from_secs(2);
+    let later = earlier + Duration::from_millis(500);
+
+    assert_eq!(now - earlier, Duration::from_secs(2));
+    assert_eq!(
+      later.checked_duration_since(earlier),
+      Some(Duration::from_millis(500))
+    );
+    assert_eq!(earlier.checked_duration_since(later), None);
+  }
+}
+
 impl<T, D> Members<T, D>
 where
   D: Delegate<Id = T::Id, Address = T::ResolvedAddress>,
