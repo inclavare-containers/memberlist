@@ -60,18 +60,32 @@ pub async fn tls_stream_layer<R: Runtime>() -> crate::tls::TlsOptions {
 
 #[cfg(all(test, feature = "tokio", feature = "tcp"))]
 mod unit_tests {
-  use std::{borrow::Cow, io, net::SocketAddr};
+  use std::{
+    borrow::Cow,
+    io,
+    net::SocketAddr,
+    sync::{
+      Arc,
+      atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+  };
 
-  use agnostic::{RuntimeLite, tokio::TokioRuntime};
+  use agnostic::{
+    Runtime, RuntimeLite,
+    net::{Net, UdpSocket},
+    tokio::TokioRuntime,
+  };
   use memberlist_core::{
-    proto::CIDRsPolicy,
+    proto::{CIDRsPolicy, Payload},
     transport::{Connection as _, Transport as _, TransportError as _},
   };
   use nodecraft::resolver::socket_addr::SocketAddrResolver;
   use smol_str::SmolStr;
 
   use crate::{
-    NetTransport, NetTransportError, NetTransportOptions, StreamLayer as _,
+    NetTransport, NetTransportError, NetTransportOptions, PacketProcessor, PromisedProcessor,
+    StreamLayer as _,
     stream_layer::{Listener as _, PromisedStream as _, tcp::Tcp},
   };
 
@@ -88,6 +102,15 @@ mod unit_tests {
 
   fn loopback(port: u16) -> SocketAddr {
     SocketAddr::from(([127, 0, 0, 1], port))
+  }
+
+  async fn recv_with_timeout<F, T>(future: F) -> T
+  where
+    F: core::future::Future<Output = T> + Send,
+  {
+    <TokioRuntime as RuntimeLite>::timeout(Duration::from_secs(1), future)
+      .await
+      .expect("timed out waiting for loopback event")
   }
 
   #[test]
@@ -232,6 +255,128 @@ mod unit_tests {
 
       transport.shutdown().await.unwrap();
       transport.shutdown().await.unwrap();
+    });
+  }
+
+  #[test]
+  fn send_to_delivers_udp_payload_and_errors_after_shutdown() {
+    rt().block_on(async {
+      let mut opts =
+        NetTransportOptions::<SmolStr, TestResolver, TestLayer>::with_stream_layer_options(
+          "send-to".into(),
+          (),
+        )
+        .with_recv_buffer_size(1024);
+      opts.add_bind_address(loopback(0));
+      let transport = TestTransport::new(opts).await.unwrap();
+
+      let receiver = <<TokioRuntime as Runtime>::Net as Net>::UdpSocket::bind(loopback(0))
+        .await
+        .unwrap();
+      let receiver_addr = receiver.local_addr().unwrap();
+
+      let mut payload = Payload::new(0, 8);
+      payload.data_mut().copy_from_slice(b"send-udp");
+      let (sent, _) = transport.send_to(&receiver_addr, payload).await.unwrap();
+      assert_eq!(sent, 8);
+
+      let mut buf = [0; 16];
+      let (received, from) = recv_with_timeout(receiver.recv_from(&mut buf))
+        .await
+        .unwrap();
+      assert_eq!(&buf[..received], b"send-udp");
+      assert_eq!(from.ip(), loopback(0).ip());
+
+      transport.shutdown().await.unwrap();
+
+      let mut payload = Payload::new(0, 5);
+      payload.data_mut().copy_from_slice(b"after");
+      let err = transport
+        .send_to(&receiver_addr, payload)
+        .await
+        .unwrap_err();
+      assert!(matches!(
+        err,
+        NetTransportError::Io(ref io_err)
+          if io_err.kind() == io::ErrorKind::ConnectionAborted
+      ));
+    });
+  }
+
+  #[test]
+  fn packet_processor_forwards_non_empty_udp_packets() {
+    rt().block_on(async {
+      let socket = <<TokioRuntime as Runtime>::Net as Net>::UdpSocket::bind(loopback(0))
+        .await
+        .unwrap();
+      let local_addr = socket.local_addr().unwrap();
+      let sender = <<TokioRuntime as Runtime>::Net as Net>::UdpSocket::bind(loopback(0))
+        .await
+        .unwrap();
+      let sender_addr = sender.local_addr().unwrap();
+      let (packet_tx, packet_rx) = memberlist_core::transport::packet_stream::<TestTransport>();
+      let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+      let shutdown = Arc::new(AtomicBool::new(false));
+
+      let task = <TokioRuntime as RuntimeLite>::spawn(
+        PacketProcessor::<TestResolver, TestTransport> {
+          packet_tx,
+          socket: Arc::new(socket),
+          local_addr,
+          shutdown: shutdown.clone(),
+          shutdown_rx,
+        }
+        .run(),
+      );
+
+      sender.send_to(&[], local_addr).await.unwrap();
+      sender.send_to(b"packet-body", local_addr).await.unwrap();
+
+      let packet = recv_with_timeout(packet_rx.recv()).await.unwrap();
+      let (from, _, payload) = packet.into_components();
+      assert_eq!(from, sender_addr);
+      assert_eq!(payload.as_ref(), b"packet-body");
+      assert!(packet_rx.is_empty());
+
+      shutdown.store(true, Ordering::SeqCst);
+      shutdown_tx.close();
+      task.await.unwrap();
+    });
+  }
+
+  #[test]
+  fn promised_processor_forwards_accepted_streams() {
+    rt().block_on(async {
+      let layer = <TestLayer as crate::StreamLayer>::new(()).await.unwrap();
+      let listener = layer.bind(loopback(0)).await.unwrap();
+      let local_addr = listener.local_addr();
+      let (stream_tx, stream_rx) = memberlist_core::transport::promised_stream::<TestTransport>();
+      let (shutdown_tx, shutdown_rx) = async_channel::bounded(1);
+
+      let task = <TokioRuntime as RuntimeLite>::spawn(
+        PromisedProcessor::<TestResolver, TestTransport, TestLayer> {
+          stream_tx,
+          ln: Arc::new(listener),
+          local_addr,
+          shutdown_rx,
+        }
+        .run(),
+      );
+
+      let mut client_stream = layer.connect(local_addr).await.unwrap();
+      let client_addr = client_stream.local_addr();
+      let (remote_addr, mut server_stream) = recv_with_timeout(stream_rx.recv()).await.unwrap();
+      assert_eq!(remote_addr, client_addr);
+      assert_eq!(server_stream.peer_addr(), client_addr);
+
+      client_stream.write_all(b"accepted").await.unwrap();
+      client_stream.flush().await.unwrap();
+      let mut buf = [0; 8];
+      server_stream.read_exact(&mut buf).await.unwrap();
+      assert_eq!(&buf, b"accepted");
+
+      shutdown_tx.close();
+      task.await.unwrap();
     });
   }
 
