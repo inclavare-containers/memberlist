@@ -206,6 +206,35 @@ mod tests {
   use super::*;
   use crate::proto::{Alive, Node};
 
+  #[derive(Debug)]
+  struct DefaultBroadcast {
+    id: SmolStr,
+    msg: SmolStr,
+  }
+
+  impl Broadcast for DefaultBroadcast {
+    type Id = SmolStr;
+    type Message = SmolStr;
+
+    fn id(&self) -> Option<&Self::Id> {
+      Some(&self.id)
+    }
+
+    fn invalidates(&self, other: &Self) -> bool {
+      self.id == other.id
+    }
+
+    fn message(&self) -> &Self::Message {
+      &self.msg
+    }
+
+    fn encoded_len(msg: &Self::Message) -> usize {
+      msg.len()
+    }
+
+    async fn finished(&self) {}
+  }
+
   fn broadcast(
     node: &str,
     notify: Option<async_channel::Sender<()>>,
@@ -236,6 +265,27 @@ mod tests {
     );
     assert!(!item.is_unique());
     assert!(format!("{item:?}").contains("MemberlistBroadcast"));
+  }
+
+  #[test]
+  fn broadcast_default_is_unique_is_false() {
+    let item = DefaultBroadcast {
+      id: "node-a".into(),
+      msg: "payload".into(),
+    };
+    let same = DefaultBroadcast {
+      id: "node-a".into(),
+      msg: "replacement".into(),
+    };
+
+    assert_eq!(item.id(), Some(&"node-a".into()));
+    assert_eq!(item.message(), "payload");
+    assert_eq!(
+      DefaultBroadcast::encoded_len(item.message()),
+      "payload".len()
+    );
+    assert!(item.invalidates(&same));
+    assert!(!item.is_unique());
   }
 
   #[tokio::test]
