@@ -247,3 +247,77 @@ where
   type Id = I;
   type Address = A;
 }
+
+#[cfg(test)]
+mod tests {
+  use std::{borrow::Cow, net::SocketAddr, sync::Arc, time::Duration};
+
+  use smol_str::SmolStr;
+
+  use super::*;
+  use crate::proto::{NodeState, State};
+
+  type TestDelegate = VoidDelegate<SmolStr, SocketAddr>;
+
+  fn node_state() -> Arc<NodeState<SmolStr, SocketAddr>> {
+    Arc::new(NodeState::new(
+      "node-a".into(),
+      "127.0.0.1:1".parse().unwrap(),
+      State::Alive,
+    ))
+  }
+
+  #[test]
+  fn void_delegate_error_formats() {
+    let err = VoidDelegateError;
+    assert_eq!(err.to_string(), "void delegate error");
+    assert_eq!(format!("{err:?}"), "VoidDelegateError");
+  }
+
+  #[tokio::test]
+  async fn void_delegate_methods_are_noops() {
+    let delegate = TestDelegate::default();
+    let node = node_state();
+
+    delegate.notify_alive(node.clone()).await.unwrap();
+    delegate
+      .notify_merge(Arc::from([node.as_ref().clone()]))
+      .await
+      .unwrap();
+    delegate.notify_conflict(node.clone(), node.clone()).await;
+    assert!(delegate.ack_payload().await.is_empty());
+    delegate
+      .notify_ping_complete(
+        node.clone(),
+        Duration::from_millis(1),
+        Bytes::from_static(b"ack"),
+      )
+      .await;
+    assert!(!delegate.disable_reliable_pings(&"node-a".into()));
+    delegate.notify_join(node.clone()).await;
+    delegate.notify_leave(node.clone()).await;
+    delegate.notify_update(node.clone()).await;
+    assert!(delegate.node_meta(8).await.is_empty());
+    delegate.notify_message(Cow::Borrowed(b"message")).await;
+    assert_eq!(
+      delegate
+        .broadcast_messages(8, |bytes| (bytes.len(), bytes))
+        .await
+        .count(),
+      0
+    );
+    assert!(delegate.local_state(true).await.is_empty());
+    delegate.merge_remote_state(b"state", false).await;
+  }
+
+  #[test]
+  fn delegate_error_constructors_format_inner_errors() {
+    let alive = DelegateError::<TestDelegate>::alive(VoidDelegateError);
+    assert_eq!(alive.to_string(), "void delegate error");
+    assert_eq!(format!("{alive:?}"), "VoidDelegateError");
+
+    let merge = DelegateError::<TestDelegate>::merge(VoidDelegateError);
+    assert_eq!(merge.to_string(), "void delegate error");
+    assert_eq!(format!("{merge:?}"), "VoidDelegateError");
+  }
+}

@@ -442,6 +442,7 @@ mod tests {
     assert!(subscriber.recv().await.is_ok());
     assert!(subscriber.close());
     assert!(producer.is_closed());
+    assert!(subscriber.is_closed());
     assert!(matches!(
       producer.try_send(Packet::new(
         "127.0.0.1:8082".parse::<SocketAddr>().unwrap(),
@@ -449,6 +450,10 @@ mod tests {
         Bytes::new(),
       )),
       Err(async_channel::TrySendError::Closed(_))
+    ));
+    assert!(matches!(
+      subscriber.try_recv(),
+      Err(async_channel::TryRecvError::Closed)
     ));
   }
 
@@ -486,12 +491,17 @@ mod tests {
     assert!(subscriber.recv().await.is_ok());
     assert!(subscriber.close());
     assert!(producer.is_closed());
+    assert!(subscriber.is_closed());
     assert!(matches!(
       producer.try_send(
         addr,
         crate::transport::unimplemented::UnimplementedConnection
       ),
       Err(async_channel::TrySendError::Closed(_))
+    ));
+    assert!(matches!(
+      subscriber.try_recv(),
+      Err(async_channel::TryRecvError::Closed)
     ));
   }
 }

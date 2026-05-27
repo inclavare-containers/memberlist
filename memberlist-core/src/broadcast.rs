@@ -214,10 +214,7 @@ mod tests {
       node: node.into(),
       msg: Message::Alive(Alive::new(
         1,
-        Node::new(
-          node.into(),
-          "127.0.0.1:1".parse().unwrap(),
-        ),
+        Node::new(node.into(), "127.0.0.1:1".parse().unwrap()),
       )),
       notify,
     }

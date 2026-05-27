@@ -213,3 +213,66 @@ impl<I, A> Stream for EventSubscriber<I, A> {
     <async_channel::Receiver<Event<I, A>> as Stream>::poll_next(self.project().0, cx)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::{net::SocketAddr, sync::Arc};
+
+  use smol_str::SmolStr;
+
+  use super::*;
+  use crate::proto::State;
+
+  fn node(name: &str) -> Arc<NodeState<SmolStr, SocketAddr>> {
+    Arc::new(NodeState::new(
+      name.into(),
+      "127.0.0.1:1".parse().unwrap(),
+      State::Alive,
+    ))
+  }
+
+  #[test]
+  fn event_constructors_clone_and_accessors() {
+    let joined = Event::join(node("join"));
+    let left = Event::leave(node("leave"));
+    let updated = Event::update(node("update"));
+
+    assert_eq!(joined.kind(), EventKind::Join);
+    assert_eq!(left.kind(), EventKind::Leave);
+    assert_eq!(updated.kind(), EventKind::Update);
+    assert_eq!(joined.clone().node_state().id().as_str(), "join");
+    assert_eq!(format!("{:?}", updated.kind()), "Update");
+  }
+
+  #[tokio::test]
+  async fn subscribe_event_delegate_sends_all_event_kinds() {
+    let (delegate, subscriber) = SubscribleEventDelegate::bounded(3);
+
+    assert_eq!(subscriber.capacity(), Some(3));
+    assert!(subscriber.is_empty());
+    assert!(!subscriber.is_full());
+
+    delegate.notify_join(node("join")).await;
+    delegate.notify_leave(node("leave")).await;
+    delegate.notify_update(node("update")).await;
+
+    assert_eq!(subscriber.len(), 3);
+    assert!(subscriber.is_full());
+    assert_eq!(subscriber.try_recv().unwrap().kind(), EventKind::Join);
+    assert_eq!(subscriber.recv().await.unwrap().kind(), EventKind::Leave);
+    assert_eq!(subscriber.recv().await.unwrap().kind(), EventKind::Update);
+    assert!(subscriber.is_empty());
+  }
+
+  #[tokio::test]
+  async fn unbounded_subscriber_reports_no_capacity() {
+    let (delegate, subscriber) = SubscribleEventDelegate::unbounded();
+    assert_eq!(subscriber.capacity(), None);
+
+    delegate.notify_join(node("join")).await;
+    assert_eq!(
+      subscriber.recv().await.unwrap().node_state().id().as_str(),
+      "join"
+    );
+  }
+}

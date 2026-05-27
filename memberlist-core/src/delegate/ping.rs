@@ -34,3 +34,48 @@ pub trait PingDelegate: Send + Sync + 'static {
     false
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use std::{net::SocketAddr, sync::Arc, time::Duration};
+
+  use smol_str::SmolStr;
+
+  use super::*;
+  use crate::proto::{NodeState, State};
+
+  struct TestPingDelegate;
+
+  impl PingDelegate for TestPingDelegate {
+    type Id = SmolStr;
+    type Address = SocketAddr;
+
+    async fn ack_payload(&self) -> Bytes {
+      Bytes::from_static(b"ack")
+    }
+
+    async fn notify_ping_complete(
+      &self,
+      _node: Arc<NodeState<Self::Id, Self::Address>>,
+      _rtt: Duration,
+      _payload: Bytes,
+    ) {
+    }
+  }
+
+  #[tokio::test]
+  async fn default_disable_reliable_pings_is_false() {
+    let delegate = TestPingDelegate;
+    let node = Arc::new(NodeState::new(
+      "node-a".into(),
+      "127.0.0.1:1".parse().unwrap(),
+      State::Alive,
+    ));
+
+    assert_eq!(delegate.ack_payload().await, Bytes::from_static(b"ack"));
+    delegate
+      .notify_ping_complete(node, Duration::from_millis(1), Bytes::new())
+      .await;
+    assert!(!delegate.disable_reliable_pings(&"node-a".into()));
+  }
+}
